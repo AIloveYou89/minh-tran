@@ -12,7 +12,7 @@ from preprocess import preprocess_text
 app = Flask(__name__)
 
 # Initialize model & processor once
-device = "cpu"
+device = "cuda"
 MODEL_ID = "DragonLineageAI/Vi-SparkTTS-0.5B"
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 model = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True).to(device).eval()
