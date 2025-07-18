@@ -17,7 +17,7 @@ from typing import Dict, Any
 app = FastAPI()
 
 # --- Initialize model & processor once ---
-device = "cpu"  # hoặc "cuda" nếu bạn có GPU
+device = "cuda"  # hoặc "cuda" nếu bạn có GPU
 MODEL_ID = "DragonLineageAI/Vi-SparkTTS-0.5B"
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
 model = (
