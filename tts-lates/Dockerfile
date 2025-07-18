@@ -16,4 +16,8 @@ COPY . .
 # Mở port Flask app (mặc định 5003)
 EXPOSE 5003
 
-CMD ["python3", "jobs_app.py"]
+# Chạy Uvicorn với 4 workers
+CMD ["uvicorn", "jobs_app:app", \
+     "--host", "0.0.0.0", \
+     "--port", "5003", \
+     "--workers", "4"]
