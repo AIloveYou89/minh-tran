@@ -8,7 +8,7 @@ import soundfile as sf
 from flask import Flask, request, jsonify, send_file, abort
 from transformers import AutoProcessor, AutoModel
 from preprocess import preprocess_text
-from typing import TypeAlias, Dict
+from typing import Any, Dict
 
 app = Flask(__name__)
 
