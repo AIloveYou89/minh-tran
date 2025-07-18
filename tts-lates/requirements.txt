@@ -12,3 +12,4 @@ transformers==4.49.0
 gradio==5.18.0
 numpy==1.26.4
 antlr4-python3-runtime==4.9.3
+flask>=2.0
