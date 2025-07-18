@@ -1,10 +1,9 @@
 # Core audio / TTS libs
-einops==0.8.1
+einops
 einx==0.3.0
 omegaconf==2.3.0
-packaging
 safetensors==0.5.2
-soundfile==0.12.1
+soundfile
 soxr==0.5.0.post1
 
 # PyTorch & ecosystem
@@ -17,13 +16,11 @@ transformers==4.49.0
 gradio==5.18.0
 
 # Utilities
-tqdm==4.67.1
 numpy
-num2words>=0.5.10         # để hỗ trợ chuyển số thành chữ trong preprocess
+num2words
 
-# Flask server
-flask>=2.0.0
+#FastAPI
+FastAPI
 
 # Runtime dependencies
-antlr4-python3-runtime==4.9.3
 uvicorn>=0.19.0
