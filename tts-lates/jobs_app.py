@@ -130,4 +130,4 @@ def get_result(job_id):
     return send_file(job['path'],mimetype='audio/wav')
 
 if __name__=='__main__':
-    app.run(host='0.0.0.0',port=5003)
+    app.run(host='0.0.0.0',port=8888)
