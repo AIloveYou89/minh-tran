@@ -30,8 +30,8 @@ def cross_fade(a: np.ndarray, b: np.ndarray, sr: int, fade_duration: float = 0.1
     b_head = b[:fade_samples] * in_fade
     return np.concatenate([a[:-fade_samples], a_tail + b_head, b[fade_samples:]], axis=0)
 # Global job store
-Job: TypeAlias = Dict[str, object] # for clarity
-jobs: Dict[str, Job] = {}
+Job = Dict[str, Any]      # định nghĩa kiểu cho rõ ràng
+jobs: Dict[str, Job] = {} # jobs[job_id] = {'status': ..., 'path': ..., …}
 # jobs[job_id] = { status, path?, error?, total_in?, total_out? }
 
 # Worker function to process TTS asynchronously
