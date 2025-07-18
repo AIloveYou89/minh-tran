@@ -1,3 +1,4 @@
+# Core audio / TTS libs
 einops==0.8.1
 einx==0.3.0
 omegaconf==2.3.0
@@ -5,12 +6,23 @@ packaging==24.2
 safetensors==0.5.2
 soundfile==0.12.1
 soxr==0.5.0.post1
+
+# PyTorch & ecosystem
 torch==2.5.1
 torchaudio==2.5.1
+torchvision==0.16.1
+
+# Transformers + Gradio
 transformers==4.49.0
 gradio==5.18.0
-numpy>=1.23.0,<2.0.0
-num2words>=0.5.10
+
+# Utilities
+tqdm==4.67.1
+numpy
+num2words>=0.5.10         # để hỗ trợ chuyển số thành chữ trong preprocess
+
+# Flask server
+flask>=2.0.0
+
+# Runtime dependencies
 antlr4-python3-runtime==4.9.3
-flask>=2.0
-torchvision
