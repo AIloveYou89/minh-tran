@@ -17,5 +17,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 WORKDIR /workspace/minh-tran/tts-lates
 
 # 5) Khởi FastAPI
-CMD ["uvicorn", "jobs_app_on_demand:app", "--host", "0.0.0.0", "--port", "5300"]
+CMD ["python", "handler.py"]
 
