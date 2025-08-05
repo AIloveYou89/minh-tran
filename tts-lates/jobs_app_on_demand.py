@@ -10,7 +10,7 @@ MODEL_ID = "DragonLineageAI/Vi-SparkTTS-0.5B"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Prompt / transcript
-LOCAL_PROMPT_PATH = "/workspace/minh-tran/tts-lates/consent_audio.wav"
+LOCAL_PROMPT_PATH = "/workspace/minh-tran/tts-lates/fixed/consent_audio.wav"
 DEFAULT_PROMPT_TRANSCRIPT = (
     "Tôi là chủ sở hữu giọng nói này và tôi đồng ý cho Google sử dụng "
     "giọng nói này để tạo mô hình giọng nói tổng hợp."
