@@ -13,11 +13,9 @@ RUN python -m pip install --no-cache-dir --upgrade pip
 COPY tts-lates/requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4) Đặt WORKDIR trùng với mount của Network Storage
-WORKDIR /workspace/minh-tran/tts-lates
-
 COPY tts-lates/handler.py 
-COPY tts-lates/preprocess.py 
+COPY tts-lates/preprocess.py
 COPY tts-lates/consent_audio.wav
+
 CMD ["python", "handler.py"]
 
