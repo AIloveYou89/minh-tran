@@ -10,7 +10,7 @@ RUN apt-get update && \
 RUN python -m pip install --no-cache-dir --upgrade pip
 
 # 3) Cài các Python-only libs (không đụng đến torch trong base image)
-COPY requirements-runtime.txt /tmp/requirements.txt
+COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # 4) Đặt WORKDIR trùng với mount của Network Storage
