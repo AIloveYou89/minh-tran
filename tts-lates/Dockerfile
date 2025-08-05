@@ -1,23 +1,21 @@
-FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
+# --------  tts-runtime.Dockerfile  --------
+FROM runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
 
-WORKDIR /workspace/
+# 1) Thư viện hệ thống cho soundfile (và ffmpeg nếu cần)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libsndfile1 ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
-# Cài Python + các gói cần thiết
-RUN apt-get update && apt-get install -y python3 python3-pip git && \
-    ln -s /usr/bin/python3 /usr/bin/python && \
-    pip install --upgrade pip
+# 2) (Tùy) nâng cấp pip
+RUN python -m pip install --no-cache-dir --upgrade pip
 
-COPY requirements.txt .
-RUN pip install -r requirements.txt
+# 3) Cài các Python-only libs (không đụng đến torch trong base image)
+COPY requirements-runtime.txt /tmp/requirements-runtime.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-runtime.txt
 
-# Copy toàn bộ code vào container
-COPY . .
+# 4) Đặt WORKDIR trùng với mount của Network Storage
+WORKDIR /workspace/minh-tran/tts-lates
 
-# Mở port Flask app (mặc định 5003)
-EXPOSE 5003
+# 5) Khởi FastAPI
+CMD ["uvicorn", "jobs_app_on_demand:app", "--host", "0.0.0.0", "--port", "5300"]
 
-# Chạy Uvicorn với 4 workers
-CMD ["uvicorn", "jobs_app:app", \
-     "--host", "0.0.0.0", \
-     "--port", "5003", \
-     "--workers", "4"]
