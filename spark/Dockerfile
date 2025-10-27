@@ -12,10 +12,10 @@ RUN pip install --upgrade pip && \
 
 # === Tên file & copy path RÕ RÀNG ===
 
-COPY requirements.txt .app/requirements.txt
+COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY app.py .app/app.py
+COPY app.py .
 
 EXPOSE 80
 CMD ["python", "-u", "app.py"]
