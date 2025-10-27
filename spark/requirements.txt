@@ -1,6 +1,10 @@
+runpod>=1.7.9
 transformers==4.46.2
 numpy==2.2.3
 soundfile==0.12.1
-fastapi==0.95.1
-uvicorn==0.22.0
-pydantic==1.10.7
+num2words==0.5.13
+boto3
+accelerate>=0.33
+numpy
+soundfile
+huggingface_hub>=0.23
