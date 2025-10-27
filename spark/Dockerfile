@@ -1,21 +1,25 @@
+# spark/Dockerfile
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+
+# System deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Torchaudio CUDA 12.4
+# Torchaudio khớp CUDA 12.4
 RUN pip install --upgrade pip && \
     pip install --index-url https://download.pytorch.org/whl/cu124 torchaudio==2.5.1+cu124
 
-# === Tên file & copy path RÕ RÀNG ===
-
-COPY spark/requirements.txt .
+# Python deps
+COPY spark/requirements.txt
 RUN pip install -r requirements.txt
 
-COPY spark/app.py .
+# Code
+COPY spark/rp_handler.py
 
-EXPOSE 80
-CMD ["python", "-u", "app.py"]
+# Queue-based: KHÔNG cần expose cổng
+CMD ["python", "-u", "rp_handler.py"]
