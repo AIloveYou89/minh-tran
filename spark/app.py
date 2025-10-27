@@ -261,9 +261,8 @@ else:
     CONSENT_PATH = None
 
 @app.get("/ping")
-async def ping():
-    # Load balancer expect HTTP status code, không cần JSON
-    return Response(status_code=200)
+async def health_check():
+    return {"status": "healthy"}
 
 @app.post("/tts")
 async def tts(payload: dict):
