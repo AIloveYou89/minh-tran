@@ -15,11 +15,11 @@ RUN pip install --upgrade pip && \
     pip install --index-url https://download.pytorch.org/whl/cu124 torchaudio==2.5.1+cu124
 
 # Python deps
-COPY spark/requirements.txt
+COPY spark/requirements.txt .
 RUN pip install -r requirements.txt
 
 # Code
-COPY spark/rp_handler.py
+COPY spark/rp_handler.py .
 
 # Queue-based: KHÔNG cần expose cổng
 CMD ["python", "-u", "rp_handler.py"]
