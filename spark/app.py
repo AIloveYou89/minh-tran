@@ -6,13 +6,15 @@ from preprocess import preprocess_text
 
 # ===== Config =====
 MODEL_ID  = os.getenv("MODEL_ID", "DragonLineageAI/Vi-SparkTTS-0.5B")
-HF_TOKEN  = os.getenv("HUGGING_FACE_HUB_TOKEN") or None
-DEVICE    = "cuda" if torch.cuda.is_available() else "cpu"
+HF_TOKEN  = os.getenv("HF_TOKEN")  # token đã cài sẵn khi deploy
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA GPU is required but not detected.")
+DEVICE    = "cuda"
 TARGET_SR = int(os.getenv("TARGET_SR", "24000"))
 
 # Network Volume mount (Serverless): /runpod-volume
-CONSENT_PATH = os.getenv("CONSENT_LOCAL", "/runpod-volume/consent_audio.wav")
-OUT_DIR      = os.getenv("OUT_DIR", "/runpod-volume/tts-out")
+CONSENT_PATH = os.getenv("CONSENT_LOCAL", "/runpod-volume/minh-tran/tts-lates/fixed/consent_audio.wav")
+OUT_DIR      = os.getenv("OUT_DIR", "/runpod-volume/minh-tran/tts-lates/jobs")
 
 app = FastAPI()
 jobs = {}
@@ -43,10 +45,14 @@ def resample_np(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     out = torchaudio.functional.resample(wav, sr_in, sr_out)
     return out.squeeze(0).numpy()
 
-# ===== Load model =====
+# ===== Load model (GPU only) =====
 print(f"[INIT] Loading {MODEL_ID} on {DEVICE}", flush=True)
-processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, use_auth_token=HF_TOKEN)
-model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, use_auth_token=HF_TOKEN).to(DEVICE).eval()
+processor = AutoProcessor.from_pretrained(
+    MODEL_ID, trust_remote_code=True, token=HF_TOKEN
+)
+model = AutoModel.from_pretrained(
+    MODEL_ID, trust_remote_code=True, token=HF_TOKEN
+).to(DEVICE).eval()
 
 if os.path.exists(CONSENT_PATH):
     print(f"[CONSENT] Using {CONSENT_PATH}", flush=True)
@@ -56,7 +62,6 @@ else:
 
 @app.get("/ping")
 async def ping():
-    # 200 = healthy, 204 = initializing (tuỳ ý nếu bạn muốn signal “đang warmup”)
     return {"status": "healthy"}
 
 @app.post("/tts")
