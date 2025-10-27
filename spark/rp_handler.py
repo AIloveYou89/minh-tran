@@ -1,20 +1,30 @@
-# rp_handler.py - RunPod Serverless with Network Volume Support
-import os, io, uuid, base64, numpy as np, soundfile as sf, torch, torchaudio
-from transformers import AutoProcessor, AutoModel
+# rp_handler.py — RunPod Serverless Queue-based (SparkTTS)
+# - GPU only (assert CUDA)
+# - prompt_speech_path + prompt_text giống rendervideo.py
+# - Không truyền global_token_ids_prompt vào generate() (chỉ decode)
+# - Tự tìm prompt ở /runpod-volume/... hoặc workspace nếu có
+# - Gộp preprocess vào cùng file (fallback nếu thiếu num2words)
+
+import os, io, uuid, base64, gc, logging, re
+import numpy as np
+import soundfile as sf
+import torch, torchaudio
 import runpod
-import gc
-import logging
-import re
-from num2words import num2words
 from typing import List, Optional
+from transformers import AutoProcessor, AutoModel
 
-# Setup logging
+# --------- optional dependency (fallback an toàn) ----------
+try:
+    from num2words import num2words
+except Exception:
+    def num2words(n, lang="vi"):  # fallback nếu thiếu lib
+        return str(n)
+
+# ----------------------- logging ---------------------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("rp_handler")
 
-# ============================================================
-# EMBEDDED PREPROCESS MODULE
-# ============================================================
+# ================== EMBEDDED PREPROCESS ====================
 MIN_CHARS_PER_CHUNK = 50
 MAX_CHARS_PER_CHUNK = 130
 OPTIMAL_CHUNK_SIZE = 80
@@ -32,15 +42,15 @@ def normalize_text_vn(text: str) -> str:
     text = _whitespace_pattern.sub(" ", text)
     text = _comma_pattern.sub(", ", text)
     text = text.lower()
-    
+
     def repl_number_with_unit(m):
         num_str = m.group(1).replace(".", "")
         unit = m.group(2) or ""
         try:
             return num2words(int(num_str), lang="vi") + (" " + unit if unit else "")
-        except:
+        except Exception:
             return m.group(0)
-    
+
     text = _number_pattern.sub(repl_number_with_unit, text)
     text = _punct_spacing_pattern.sub(r"\1", text)
     text = _repeated_punct_pattern.sub(lambda m: m.group(0)[0], text)
@@ -72,53 +82,40 @@ def ensure_leading_dot(s: str) -> str:
 def smart_chunk_split(text: str) -> List[str]:
     chunks = []
     words = text.split()
-    current_chunk = []
-    current_length = 0
-    
-    for word in words:
-        word_len = len(word) + 1
-        
-        if current_length + word_len > MAX_CHARS_PER_CHUNK and current_chunk:
-            chunk_text = " ".join(current_chunk)
-            if len(chunk_text) < MIN_CHARS_PER_CHUNK and len(chunks) > 0:
-                prev_chunk = chunks[-1]
-                if len(prev_chunk) + len(chunk_text) + 1 <= MAX_CHARS_PER_CHUNK:
-                    chunks[-1] = prev_chunk + " " + chunk_text
-                    current_chunk = [word]
-                    current_length = word_len
+    cur, cur_len = [], 0
+    for w in words:
+        wl = len(w) + 1
+        if cur_len + wl > MAX_CHARS_PER_CHUNK and cur:
+            ck = " ".join(cur)
+            if len(ck) < MIN_CHARS_PER_CHUNK and chunks:
+                prev = chunks[-1]
+                if len(prev) + len(ck) + 1 <= MAX_CHARS_PER_CHUNK:
+                    chunks[-1] = prev + " " + ck
+                    cur, cur_len = [w], wl
                     continue
-            
-            chunks.append(chunk_text)
-            current_chunk = [word]
-            current_length = word_len
+            chunks.append(ck)
+            cur, cur_len = [w], wl
         else:
-            current_chunk.append(word)
-            current_length += word_len
-    
-    if current_chunk:
-        chunk_text = " ".join(current_chunk)
-        if len(chunk_text) < MIN_CHARS_PER_CHUNK and chunks:
-            chunks[-1] += " " + chunk_text
+            cur.append(w); cur_len += wl
+    if cur:
+        ck = " ".join(cur)
+        if len(ck) < MIN_CHARS_PER_CHUNK and chunks:
+            chunks[-1] += " " + ck
         else:
-            chunks.append(chunk_text)
-    
+            chunks.append(ck)
     return chunks
 
 def preprocess_text(text: str) -> List[str]:
     clean = normalize_text_vn(text)
-    sentences = split_into_sentences(clean)
-    
-    if not sentences:
+    sents = split_into_sentences(clean)
+    if not sents:
         s = ensure_punctuation(clean)
         return [ensure_leading_dot(s)]
-    
-    chunks = []
-    buffer = ""
-    
-    for i, sent in enumerate(sentences, 1):
+
+    chunks, buf = [], ""
+    for i, sent in enumerate(sents, 1):
         sent = ensure_punctuation(sent)
         sent = re.sub(r'^([^\w]*\w[^,]{0,10}),\s*', r'\1 ', sent)
-        
         if i <= 5:
             if len(sent) > MAX_CHARS_PER_CHUNK:
                 chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(sent)])
@@ -126,406 +123,272 @@ def preprocess_text(text: str) -> List[str]:
                 chunks.append(ensure_leading_dot(sent))
         else:
             if len(sent) > MAX_CHARS_PER_CHUNK:
-                if buffer:
-                    chunks.append(ensure_leading_dot(buffer))
-                    buffer = ""
+                if buf:
+                    chunks.append(ensure_leading_dot(buf)); buf = ""
                 chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(sent)])
             else:
-                if buffer and len(buffer) + len(sent) + 1 > OPTIMAL_CHUNK_SIZE:
-                    chunks.append(ensure_leading_dot(buffer))
-                    buffer = sent
-                elif buffer:
-                    buffer += " " + sent
+                if buf and len(buf) + len(sent) + 1 > OPTIMAL_CHUNK_SIZE:
+                    chunks.append(ensure_leading_dot(buf)); buf = sent
+                elif buf:
+                    buf += " " + sent
                 else:
-                    buffer = sent
-    
-    if buffer:
-        if len(buffer) > MAX_CHARS_PER_CHUNK:
-            chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(buffer)])
+                    buf = sent
+    if buf:
+        if len(buf) > MAX_CHARS_PER_CHUNK:
+            chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(buf)])
         else:
-            chunks.append(ensure_leading_dot(ensure_punctuation(buffer)))
-    
+            chunks.append(ensure_leading_dot(ensure_punctuation(buf)))
     return chunks
+# ================== END PREPROCESS ==========================
 
-# ============================================================
-# END EMBEDDED PREPROCESS MODULE
-# ============================================================
-
-# ===== Config =====
-MODEL_ID  = os.getenv("MODEL_ID", "DragonLineageAI/Vi-SparkTTS-0.5B")
-HF_TOKEN  = os.getenv("HF_TOKEN")
+# --------------------- Config (GPU only) --------------------
+MODEL_ID = os.getenv("MODEL_ID", "DragonLineageAI/Vi-SparkTTS-0.5B")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
 assert HF_TOKEN, "Missing HF_TOKEN env."
-
 assert torch.cuda.is_available(), "CUDA/GPU not available."
-DEVICE    = "cuda"
+DEVICE = "cuda"
 TARGET_SR = int(os.getenv("TARGET_SR", "24000"))
 
-# ===== CRITICAL: Network Volume Path Detection =====
-def detect_network_volume_path() -> Optional[str]:
-    """
-    Tự động detect Network Volume path trong RunPod Serverless
-    RunPod mount network volume tại /runpod-volume khi được attach
-    """
-    possible_roots = [
-        "/runpod-volume",  # Default RunPod network volume mount point
-        os.getenv("RUNPOD_VOLUME_PATH"),  # Custom env if set
-        os.getenv("NV_ROOT"),  # Backward compatibility
+# ----------------- Storage / Prompt paths -------------------
+def detect_nv_root() -> Optional[str]:
+    candidates = [
+        os.getenv("NV_ROOT"),
+        "/runpod-volume",  # Network Volume mount (Runpod)
+        "/workspace"      # fallback nếu bạn bake file sẵn trong image
     ]
-    
-    for root in possible_roots:
-        if root and os.path.exists(root) and os.path.isdir(root):
-            logger.info(f"[VOLUME] ✅ Found Network Volume at: {root}")
-            return root
-    
-    logger.warning("[VOLUME] ⚠️ No Network Volume detected. Prompt voice will not be available.")
+    for p in candidates:
+        if p and os.path.isdir(p):
+            logger.info(f"[VOLUME] Using NV root: {p}")
+            return p
+    logger.warning("[VOLUME] Not found, will use /tmp for outputs")
     return None
 
-NV_ROOT = detect_network_volume_path()
-
-# ===== Prompt Audio Path Detection =====
-def find_prompt_audio() -> Optional[str]:
-    """
-    Tìm prompt audio trong Network Volume với nhiều fallback paths
-    """
-    if not NV_ROOT:
-        logger.warning("[PROMPT] No Network Volume, cannot load prompt audio")
-        return None
-    
-    # Các đường dẫn có thể có
-    possible_paths = [
-        os.path.join(NV_ROOT, "workspace/consent_audio.wav"),
-        os.path.join(NV_ROOT, "consent_audio.wav"),
-        os.path.join(NV_ROOT, "audio/consent_audio.wav"),
-        os.path.join(NV_ROOT, "prompts/consent_audio.wav"),
-    ]
-    
-    for path in possible_paths:
-        if os.path.exists(path):
-            try:
-                # Validate audio
-                audio_data, sr = sf.read(path)
-                if len(audio_data) == 0:
-                    logger.warning(f"[PROMPT] Empty audio: {path}")
-                    continue
-                
-                duration = len(audio_data) / sr
-                if duration < 1.0:
-                    logger.warning(f"[PROMPT] Too short ({duration:.2f}s): {path}")
-                    continue
-                
-                max_amp = np.max(np.abs(audio_data))
-                if max_amp < 0.001:
-                    logger.warning(f"[PROMPT] Too quiet (max_amp={max_amp}): {path}")
-                    continue
-                
-                logger.info(f"[PROMPT] ✅ Found valid prompt: {path}")
-                logger.info(f"[PROMPT] Duration: {duration:.2f}s, Sample rate: {sr}, Max amplitude: {max_amp:.4f}")
-                return path
-                
-            except Exception as e:
-                logger.error(f"[PROMPT] Error reading {path}: {e}")
-                continue
-    
-    logger.warning(f"[PROMPT] ⚠️ No valid prompt audio found in: {possible_paths}")
-    return None
-
-# Output directory
+NV_ROOT = detect_nv_root()
 OUT_DIR = os.path.join(NV_ROOT, "jobs") if NV_ROOT else "/tmp/jobs"
 
-# ===== Helper Functions =====
-def calc_max_new(text: str, in_tok: int, base_ratio: float = 2.5, cap: int = 1800) -> int:
-    text_len = len(text.strip())
-    
-    if text_len < 50:
-        ratio = base_ratio * 1.5
-    elif text_len < 200:
-        ratio = base_ratio * 1.1
-    elif text_len < 500:
-        ratio = base_ratio
-    else:
-        ratio = base_ratio * 0.8
-    
-    estimated_by_text = int(text_len * 0.3 * ratio)
-    estimated_by_input = int(in_tok * ratio)
-    
-    max_new = max(estimated_by_text, estimated_by_input)
-    max_new = int(max_new * 1.2)
-    
-    final_max = min(cap, max(max_new, 600))
-    return final_max
+def resolve_prompt_path() -> Optional[str]:
+    # Ưu tiên biến môi trường cho chuẩn hoá
+    env_prompt = os.getenv("PROMPT_LOCAL")
+    if env_prompt and os.path.exists(env_prompt):
+        return env_prompt
+    # Các đường dẫn phổ biến (tuỳ bạn đang lưu ở đâu)
+    candidates = []
+    if NV_ROOT:
+        candidates += [
+            os.path.join(NV_ROOT, "fixed/consent_audio.wav"),
+            os.path.join(NV_ROOT, "consent_audio.wav"),
+            os.path.join(NV_ROOT, "workspace/consent_audio.wav"),
+        ]
+    # baked-in (nếu bạn copy sẵn vào image như bản cũ)
+    candidates += [
+        "/workspace/minh-tran/tts-lates/fixed/consent_audio.wav"
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
 
-def validate_audio_output(audio: np.ndarray, sr: int, chunk_text: str) -> bool:
-    if audio is None or len(audio) == 0:
-        return False
-    
-    max_amp = np.max(np.abs(audio))
-    if max_amp < 0.001:
-        logger.warning(f"Audio too quiet: max_amp={max_amp}")
-        return False
-    
-    return True
+PROMPT_PATH = resolve_prompt_path()
+if PROMPT_PATH:
+    try:
+        a, sr = sf.read(PROMPT_PATH)
+        logger.info(f"[PROMPT] Found: {PROMPT_PATH} ({len(a)/sr:.2f}s @ {sr}Hz)")
+    except Exception as e:
+        logger.warning(f"[PROMPT] Read error {PROMPT_PATH}: {e}")
+        PROMPT_PATH = None
+else:
+    logger.warning("[PROMPT] Not found → run without prompt voice")
+
+# ------------------- Audio helpers -------------------------
+def resample_np(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
+    if sr_in == sr_out: return x
+    wav = torch.from_numpy(x).unsqueeze(0)
+    out = torchaudio.functional.resample(wav, sr_in, sr_out)
+    return out.squeeze(0).numpy()
 
 def join_with_pause(a: np.ndarray, b: np.ndarray, sr: int,
                     gap_sec: float = 0.2, fade_sec: float = 0.1):
     gap_n  = max(int(sr * 0.1), int(sr * gap_sec))
     fade_n = max(0, int(sr * fade_sec))
-
     if a.ndim == 2:
-        ch = a.shape[1]
-        silence = np.zeros((gap_n, ch), dtype=np.float32)
+        silence = np.zeros((gap_n, a.shape[1]), dtype=np.float32)
     else:
         silence = np.zeros(gap_n, dtype=np.float32)
-
     if fade_n <= 0 or len(a) < fade_n or len(b) < fade_n:
         return np.concatenate([a, silence, b], axis=0)
-
-    fade_out = np.linspace(1.0, 0.0, fade_n, dtype=np.float32)
-    fade_in  = fade_out[::-1]
+    fo = np.linspace(1.0, 0.0, fade_n, dtype=np.float32)
+    fi = fo[::-1]
     if a.ndim == 2:
-        fade_out = fade_out[:, None]
-        fade_in  = fade_in[:, None]
-
-    a_tail = a[-fade_n:] * fade_out
-    b_head = b[:fade_n]  * fade_in
-
-    return np.concatenate([a[:-fade_n], a_tail, silence, b_head, b[fade_n:]], axis=0)
+        fo, fi = fo[:, None], fi[:, None]
+    return np.concatenate([a[:-fade_n], a[-fade_n:] * fo, silence, b[:fade_n] * fi, b[fade_n:]], axis=0)
 
 def normalize_peak(x: np.ndarray, peak=0.95):
-    if x is None or x.size == 0: 
-        return x
+    if x is None or x.size == 0: return x
     m = float(np.max(np.abs(x)))
     return (x / m * peak).astype(np.float32) if m > 0 else x
 
-def resample_np(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
-    if sr_in == sr_out: 
-        return x
-    wav = torch.from_numpy(x).unsqueeze(0)
-    out = torchaudio.functional.resample(wav, sr_in, sr_out)
-    return out.squeeze(0).numpy()
+def calc_max_new(text: str, in_tok: int, base_ratio: float = 2.5, cap: int = 1800) -> int:
+    L = len(text.strip())
+    if L < 50: ratio = base_ratio * 1.5
+    elif L < 200: ratio = base_ratio * 1.1
+    elif L < 500: ratio = base_ratio
+    else: ratio = base_ratio * 0.8
+    est_text  = int(L * 0.3 * ratio)
+    est_input = int(in_tok * ratio)
+    max_new = int(max(est_text, est_input) * 1.2)
+    return min(cap, max(max_new, 600))
 
-# ===== Load model once =====
+# ------------------ Load model once (GPU) -------------------
 logger.info(f"[INIT] Loading {MODEL_ID} on {DEVICE}")
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN)
 model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN).to(DEVICE).eval()
 
-# CRITICAL: Link processor to model for voice cloning
-processor.link_model(model)
-logger.info("[INIT] ✅ Processor linked to model")
+# Một số repo SparkTTS hỗ trợ link_model, nếu không có thì bỏ qua
+try:
+    processor.link_model(model)  # optional
+    logger.info("[INIT] Processor linked to model")
+except Exception:
+    pass
 
-# ===== Find prompt audio =====
-PROMPT_PATH = find_prompt_audio()
-if PROMPT_PATH:
-    logger.info(f"[INIT] ✅ Prompt audio ready: {PROMPT_PATH}")
-else:
-    logger.warning("[INIT] ⚠️ Running without prompt audio (will use default voice)")
-
-# ===== Runpod handler =====
+# =================== RunPod handler =========================
 def handler(job):
     """
-    Enhanced handler with Network Volume support
+    Queue-based handler
+    input:
+      text: str (bắt buộc)
+      prompt_path: optional override path cho prompt_speech_path
+      prompt_transcript: optional text đồng ý (mặc định tiếng Việt)
+      gap_sec, fade_sec, return("path"|"base64"), outfile
     """
-    inp = job["input"] or {}
+    inp = job.get("input") or {}
     text = (inp.get("text") or "").strip()
-    
     if not text:
         return {"error": "Missing 'text'."}
 
-    if len(text) > 100000:
-        return {"error": "Text too long (max 100000 characters)"}
-
-    # Parameters
-    gap_sec  = max(0.1, min(1.0, float(inp.get("gap_sec", 0.2))))
-    fade_sec = max(0.05, min(0.5, float(inp.get("fade_sec", 0.1))))
+    gap_sec  = max(0.05, min(1.0, float(inp.get("gap_sec", 0.2))))
+    fade_sec = max(0.05, min(0.5,  float(inp.get("fade_sec", 0.1))))
     ret_mode = inp.get("return", "path")
     outfile  = inp.get("outfile")
-    
-    # Prompt configuration
-    custom_prompt_path = inp.get("prompt_path")
-    prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này, và tôi đồng ý cho Google sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
-    
-    # Determine active prompt path
-    active_prompt_path = None
-    if custom_prompt_path and os.path.exists(custom_prompt_path):
-        active_prompt_path = custom_prompt_path
-        logger.info(f"[HANDLER] Using custom prompt: {custom_prompt_path}")
-    elif PROMPT_PATH:
-        active_prompt_path = PROMPT_PATH
-        logger.info(f"[HANDLER] Using default prompt: {PROMPT_PATH}")
-    else:
-        logger.warning("[HANDLER] ⚠️ No prompt audio available, using default voice")
+    prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này, và tôi đồng ý cho hệ thống sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
 
-    # Preprocess text
+    # Chọn prompt thực tế
+    active_prompt = None
+    custom_prompt = inp.get("prompt_path")
+    if custom_prompt and os.path.exists(custom_prompt):
+        active_prompt = custom_prompt
+        logger.info(f"[PROMPT] Using custom prompt: {custom_prompt}")
+    elif PROMPT_PATH:
+        active_prompt = PROMPT_PATH
+        logger.info(f"[PROMPT] Using default prompt: {PROMPT_PATH}")
+    else:
+        logger.info("[PROMPT] No prompt_speech_path → default voice")
+
+    # Tiền xử lý
     try:
         chunks = preprocess_text(text)
-        logger.info(f"[HANDLER] Preprocessed into {len(chunks)} chunks")
     except Exception as e:
-        logger.error(f"[HANDLER] Preprocessing failed: {e}")
-        return {"error": f"Text preprocessing failed: {str(e)}"}
+        return {"error": f"Preprocess failed: {e}"}
+    logger.info(f"[HANDLER] {len(chunks)} chunks")
 
-    full_audio = None
-    sr = TARGET_SR
-    global_tokens = None
+    os.makedirs(OUT_DIR, exist_ok=True)
+    full, sr = None, TARGET_SR
     total_in = total_out = 0
-    successful_chunks = 0
 
-    # Process each chunk
-    for idx, chunk in enumerate(chunks):
-        chunk = chunk.strip()
-        if not chunk:
+    for i, ck in enumerate(chunks, 1):
+        ck = ck.strip()
+        if not ck:
             continue
-            
-        logger.info(f"[HANDLER] Processing Chunk {idx+1}/{len(chunks)}: {len(chunk)} chars")
-        
-        retry_count = 0
-        max_retries = 2
-        chunk_audio = None
-        
-        while retry_count <= max_retries and chunk_audio is None:
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Prepare inputs
-                proc_args = {
-                    "text": chunk,
-                    "return_tensors": "pt"
-                }
-                
-                # Only add prompt if available
-                if active_prompt_path:
-                    proc_args["prompt_speech_path"] = active_prompt_path
-                    proc_args["prompt_text"] = prompt_transcript
-                
-                inputs = processor(**proc_args)
-                inputs = {k: (v.to(DEVICE) if hasattr(v, "to") else v) for k, v in inputs.items()}
-                
-                in_tok = inputs["input_ids"].shape[-1]
-                total_in += in_tok
 
-                # Global tokens handling
-                if idx == 0:
-                    global_tokens = inputs.get("global_token_ids_prompt", None)
-                    if global_tokens is not None:
-                        logger.info(f"[HANDLER] Global tokens shape: {global_tokens.shape}")
-                else:
-                    _ = inputs.pop("global_token_ids_prompt", None)
+        # Chuẩn bị input cho processor
+        proc_args = {"text": ck, "return_tensors": "pt"}
+        if active_prompt:
+            proc_args["prompt_speech_path"] = active_prompt
+            proc_args["prompt_text"] = prompt_transcript
 
-                max_new = calc_max_new(chunk, in_tok)
+        # Tạo inputs và đưa lên GPU
+        inputs = processor(**proc_args)
+        inputs = {k: (v.to(DEVICE) if hasattr(v, "to") else v) for k, v in inputs.items()}
 
-                # Generate
-                gen_kwargs = {
-                    **inputs,
-                    "max_new_tokens": max_new,
-                    "do_sample": True,
-                    "temperature": 0.7,
-                    "top_k": 50,
-                    "top_p": 0.8,
-                    "repetition_penalty": 1.1,
-                    "eos_token_id": processor.tokenizer.eos_token_id,
-                    "pad_token_id": processor.tokenizer.pad_token_id
-                }
-                
-                if idx > 0 and global_tokens is not None:
-                    gen_kwargs["global_token_ids_prompt"] = global_tokens
+        # LẤY global tokens rồi POP RA KHỎI inputs (QUAN TRỌNG)
+        global_tokens = inputs.pop("global_token_ids_prompt", None)
 
-                with torch.no_grad():
-                    output_ids = model.generate(**gen_kwargs)
+        in_tok = int(inputs["input_ids"].shape[-1])
+        total_in += in_tok
+        max_new = calc_max_new(ck, in_tok)
 
-                out_tok = output_ids.shape[-1]
-                total_out += out_tok
+        gen_kwargs = dict(
+            **inputs,
+            max_new_tokens=max_new,
+            do_sample=True,
+            temperature=0.7,
+            top_k=50,
+            top_p=0.8,
+            repetition_penalty=1.1,
+            eos_token_id=processor.tokenizer.eos_token_id,
+            pad_token_id=processor.tokenizer.pad_token_id
+        )
 
-                # Decode audio
-                decode_kwargs = {
-                    "generated_ids": output_ids,
-                    "input_ids_len": in_tok,
-                    "return_type": "np"
-                }
-                
-                if global_tokens is not None:
-                    decode_kwargs["global_token_ids_prompt"] = global_tokens
-                
-                audio_dict = processor.decode(**decode_kwargs)
-                
-                audio = np.asarray(audio_dict["audio"], dtype=np.float32)
-                sr_in = int(audio_dict.get("sampling_rate", TARGET_SR))
-                
-                if sr_in != TARGET_SR:
-                    audio = resample_np(audio, sr_in, TARGET_SR)
+        # KHÔNG truyền global_token_ids_prompt vào generate()
 
-                if validate_audio_output(audio, TARGET_SR, chunk):
-                    chunk_audio = audio
-                    successful_chunks += 1
-                    logger.info(f"[HANDLER] Chunk {idx+1} SUCCESS: {len(audio)/TARGET_SR:.2f}s")
-                    break
-                else:
-                    retry_count += 1
-                    if retry_count <= max_retries:
-                        logger.warning(f"[HANDLER] Retry {retry_count}/{max_retries}")
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        gc.collect()
-                    
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"[HANDLER] Chunk {idx+1} error: {e}")
-                if retry_count <= max_retries:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    gc.collect()
-                continue
+        with torch.no_grad():
+            output_ids = model.generate(**gen_kwargs)
 
-        if chunk_audio is not None:
-            if full_audio is None:
-                full_audio = chunk_audio
-            else:
-                full_audio = join_with_pause(full_audio, chunk_audio, TARGET_SR, gap_sec, fade_sec)
+        out_tok = int(output_ids.shape[-1])
+        total_out += out_tok
+
+        # Decode — TRUYỀN global_token_ids_prompt Ở ĐÂY (đúng chỗ)
+        decode_kwargs = {
+            "generated_ids": output_ids,
+            "input_ids_len": in_tok,
+            "return_type": "np"
+        }
+        if global_tokens is not None:
+            decode_kwargs["global_token_ids_prompt"] = global_tokens
+
+        audio_dict = processor.decode(**decode_kwargs)
+        audio = np.asarray(audio_dict["audio"], dtype=np.float32)
+        sr_in = int(audio_dict.get("sampling_rate", TARGET_SR))
+        if sr_in != TARGET_SR:
+            audio = resample_np(audio, sr_in, TARGET_SR)
+
+        # Ghép
+        if full is None:
+            full = audio
         else:
-            logger.error(f"[HANDLER] Failed chunk {idx+1}")
+            full = join_with_pause(full, audio, TARGET_SR, gap_sec, fade_sec)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
 
-    if full_audio is None or successful_chunks == 0:
-        return {
-            "error": f"TTS failed. Success: {successful_chunks}/{len(chunks)}",
-            "total_chunks": len(chunks),
-            "successful_chunks": successful_chunks
-        }
+    if full is None or full.size == 0:
+        return {"error": "TTS failed or empty output"}
 
-    full_audio = normalize_peak(full_audio)
-    final_duration = len(full_audio) / TARGET_SR
-    
-    os.makedirs(OUT_DIR, exist_ok=True)
+    full = normalize_peak(full)
     job_id = str(uuid.uuid4())
     name = outfile or f"{job_id}.wav"
     out_path = os.path.join(OUT_DIR, name)
-    
-    sf.write(out_path, full_audio, TARGET_SR)
-    logger.info(f"[HANDLER] ✅ Saved: {out_path}, duration: {final_duration:.2f}s")
+    sf.write(out_path, full, TARGET_SR)
+    dur = round(len(full) / TARGET_SR, 2)
 
     result = {
         "job_id": job_id,
         "sample_rate": TARGET_SR,
-        "duration": round(final_duration, 2),
-        "total_chunks": len(chunks),
-        "successful_chunks": successful_chunks,
+        "duration": dur,
         "total_input_tokens": total_in,
         "total_output_tokens": total_out,
-        "used_prompt_voice": active_prompt_path is not None,
-        "prompt_path": active_prompt_path,
-        "network_volume_detected": NV_ROOT is not None
+        "used_prompt_voice": bool(active_prompt),
+        "prompt_path": active_prompt,
     }
 
     if ret_mode == "base64":
         with io.BytesIO() as buf:
-            sf.write(buf, full_audio, TARGET_SR, format="WAV")
-            b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-        result["audio_b64"] = b64
+            sf.write(buf, full, TARGET_SR, format="WAV")
+            result["audio_b64"] = base64.b64encode(buf.getvalue()).decode("utf-8")
     else:
         result["path"] = out_path
 
     return result
 
-# Start serverless worker
+# Queue-based start
 runpod.serverless.start({"handler": handler})
