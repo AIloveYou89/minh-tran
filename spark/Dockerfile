@@ -20,6 +20,7 @@ RUN pip install -r requirements.txt
 
 # Code
 COPY spark/rp_handler.py .
+COPY spark/preprocess.py .
 
 # Queue-based: KHÔNG cần expose cổng
 CMD ["python", "-u", "rp_handler.py"]
