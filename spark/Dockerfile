@@ -11,10 +11,11 @@ RUN pip install --upgrade pip && \
     pip install --index-url https://download.pytorch.org/whl/cu124 torchaudio==2.5.1+cu124
 
 # === Tên file & copy path RÕ RÀNG ===
-COPY requirements.txt ./requirements.txt
+
+COPY requirements.txt .app/requirements.txt
 RUN pip install -r requirements.txt
 
-COPY app.py ./app.py
+COPY app.py .app/app.py
 
 EXPOSE 80
 CMD ["python", "-u", "app.py"]
