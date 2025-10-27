@@ -170,7 +170,7 @@ TARGET_SR = int(os.getenv("TARGET_SR", "24000"))
 
 # Network Volume mount
 NV_ROOT    = os.getenv("NV_ROOT", "/runpod-volume")
-CONSENT_PATH = os.getenv("CONSENT_LOCAL", os.path.join(NV_ROOT, "runpod-volume/consent_audio.wav"))
+CONSENT_PATH = os.getenv("CONSENT_LOCAL", os.path.join(NV_ROOT, "fixed/consent_audio.wav"))
 OUT_DIR      = os.getenv("OUT_DIR", os.path.join(NV_ROOT, "jobs"))
 
 # ===== Helper Functions =====
