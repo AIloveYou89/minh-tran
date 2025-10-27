@@ -308,6 +308,10 @@ logger.info(f"[INIT] Loading {MODEL_ID} on {DEVICE}")
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN)
 model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN).to(DEVICE).eval()
 
+# CRITICAL: Link processor to model for voice cloning
+processor.link_model(model)
+logger.info("[INIT] ✅ Processor linked to model")
+
 # ===== Find prompt audio =====
 PROMPT_PATH = find_prompt_audio()
 if PROMPT_PATH:
