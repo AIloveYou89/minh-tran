@@ -170,7 +170,7 @@ TARGET_SR = int(os.getenv("TARGET_SR", "24000"))
 
 # Network Volume mount
 NV_ROOT    = os.getenv("NV_ROOT", "/runpod-volume")
-CONSENT_PATH = os.getenv("CONSENT_LOCAL", os.path.join(NV_ROOT, "consent_audio.wav"))
+PROMPT_PATH = os.getenv("PROMPT_PATH", os.path.join(NV_ROOT, "workspace/consent_audio.wav"))
 OUT_DIR      = os.getenv("OUT_DIR", os.path.join(NV_ROOT, "jobs"))
 
 # ===== Helper Functions =====
@@ -254,20 +254,20 @@ logger.info(f"[INIT] Loading {MODEL_ID} on {DEVICE}")
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN)
 model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN).to(DEVICE).eval()
 
-# Validate consent audio
-if os.path.exists(CONSENT_PATH):
+# ===== Validate prompt audio =====
+if os.path.exists(PROMPT_PATH):
     try:
-        audio_data, sr = sf.read(CONSENT_PATH)
+        audio_data, sr = sf.read(PROMPT_PATH)
         if len(audio_data) > 0:
-            logger.info(f"[CONSENT] Valid audio: {CONSENT_PATH}, duration: {len(audio_data)/sr:.2f}s")
+            logger.info(f"[PROMPT] Valid prompt audio: {PROMPT_PATH}, duration: {len(audio_data)/sr:.2f}s")
         else:
-            logger.warning(f"[CONSENT] Audio file is empty: {CONSENT_PATH}")
+            logger.warning(f"[PROMPT] Audio file is empty: {PROMPT_PATH}")
     except Exception as e:
-        logger.error(f"[CONSENT] Error reading audio: {e}")
-        CONSENT_PATH = None
+        logger.error(f"[PROMPT] Error reading audio: {e}")
+        PROMPT_PATH = None
 else:
-    logger.warning("[CONSENT] Not found; proceed without prompt voice.")
-    CONSENT_PATH = None
+    logger.warning("[PROMPT] Not found; run without prompt voice.")
+    PROMPT_PATH = None
 
 # ===== Runpod handler =====
 def handler(job):
@@ -289,15 +289,15 @@ def handler(job):
         return {"error": "Missing 'text'."}
 
     # Validate text length
-    if len(text) > 10000:
-        return {"error": "Text too long (max 10000 characters)"}
+    if len(text) > 100000:
+        return {"error": "Text too long (max 100000 characters)"}
 
     # Parameters với validation
     gap_sec  = max(0.1, min(1.0, float(inp.get("gap_sec", 0.2))))
     fade_sec = max(0.05, min(0.5, float(inp.get("fade_sec", 0.1))))
     ret_mode = inp.get("return", "path")
     outfile  = inp.get("outfile")
-    prompt_transcript = inp.get("prompt_transcript", " chủ sở hữu giọng nói này, và tôi đồng ý cho Google sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
+    prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này, và tôi đồng ý cho Google sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
 
     # Preprocess text
     try:
@@ -338,9 +338,10 @@ def handler(job):
                     "return_tensors": "pt"
                 }
                 
-                if CONSENT_PATH and os.path.exists(CONSENT_PATH):
-                    proc_args["prompt_speech_path"] = CONSENT_PATH
+                if PROMPT_PATH and os.path.exists(PROMPT_PATH):
+                    proc_args["prompt_speech_path"] = PROMPT_PATH
                     proc_args["prompt_text"] = prompt_transcript
+
                 
                 inputs = processor(**proc_args)
                 inputs = {k: (v.to(DEVICE) if hasattr(v, "to") else v) for k, v in inputs.items()}
