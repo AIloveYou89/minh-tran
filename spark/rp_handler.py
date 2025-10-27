@@ -1,21 +1,162 @@
-# rp_handler.py - Fixed version based on rendervideo.py
+# rp_handler.py - RunPod Serverless Ready (Embedded preprocess)
 import os, io, uuid, base64, numpy as np, soundfile as sf, torch, torchaudio
 from transformers import AutoProcessor, AutoModel
 import runpod
 import gc
 import logging
+import re
+from num2words import num2words
+from typing import List
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Import preprocess từ file riêng
-try:
-    from preprocess import preprocess_text
-    logger.info("[INIT] preprocess module loaded successfully")
-except ImportError:
-    logger.error("[INIT] ERROR: preprocess.py is required!")
-    raise ImportError("preprocess.py not found! This file is required for text chunking.")
+# ============================================================
+# EMBEDDED PREPROCESS MODULE (từ preprocess.py)
+# ============================================================
+MIN_CHARS_PER_CHUNK = 50
+MAX_CHARS_PER_CHUNK = 130
+OPTIMAL_CHUNK_SIZE = 80
+PUNCS = r".?!…"
+
+# Cache compiled regex patterns
+_number_pattern = re.compile(r"(\d{1,3}(?:\.\d{3})*)(?:\s*(%|[^\W\d_]+))?", re.UNICODE)
+_whitespace_pattern = re.compile(r"\s+")
+_comma_pattern = re.compile(r"\s*,\s*")
+_punct_spacing_pattern = re.compile(r"\s+([,;:])")
+_repeated_punct_pattern = re.compile(rf"[{PUNCS}]{{2,}}")
+_punct_no_space_pattern = re.compile(rf"([{PUNCS}])(?=\S)")
+
+def normalize_text_vn(text: str) -> str:
+    """Tối ưu normalize với cached regex patterns"""
+    text = text.strip()
+    text = _whitespace_pattern.sub(" ", text)
+    text = _comma_pattern.sub(", ", text)
+    text = text.lower()
+    
+    def repl_number_with_unit(m):
+        num_str = m.group(1).replace(".", "")
+        unit = m.group(2) or ""
+        try:
+            return num2words(int(num_str), lang="vi") + (" " + unit if unit else "")
+        except:
+            return m.group(0)
+    
+    text = _number_pattern.sub(repl_number_with_unit, text)
+    text = _punct_spacing_pattern.sub(r"\1", text)
+    text = _repeated_punct_pattern.sub(lambda m: m.group(0)[0], text)
+    text = _punct_no_space_pattern.sub(r"\1 ", text)
+    return text.strip()
+
+def split_into_sentences(text: str) -> List[str]:
+    """Chia câu với regex tối ưu"""
+    parts = re.split(rf"(?<=[{PUNCS}])\s+", text)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p or re.fullmatch(rf"[{PUNCS}]+", p):
+            continue
+        out.append(p)
+    return out
+
+def ensure_punctuation(s: str) -> str:
+    """Đảm bảo câu có dấu câu"""
+    s = s.strip()
+    if not s.endswith(tuple(PUNCS)):
+        s += "."
+    return s
+
+def ensure_leading_dot(s: str) -> str:
+    """Đảm bảo câu bắt đầu bằng dấu chấm nếu cần"""
+    s = s.lstrip()
+    if s and s[0] not in PUNCS:
+        return ". " + s
+    return s
+
+def smart_chunk_split(text: str) -> List[str]:
+    """Chia chunk thông minh dựa trên độ dài optimal"""
+    chunks = []
+    words = text.split()
+    current_chunk = []
+    current_length = 0
+    
+    for word in words:
+        word_len = len(word) + 1
+        
+        if current_length + word_len > MAX_CHARS_PER_CHUNK and current_chunk:
+            chunk_text = " ".join(current_chunk)
+            if len(chunk_text) < MIN_CHARS_PER_CHUNK and len(chunks) > 0:
+                prev_chunk = chunks[-1]
+                if len(prev_chunk) + len(chunk_text) + 1 <= MAX_CHARS_PER_CHUNK:
+                    chunks[-1] = prev_chunk + " " + chunk_text
+                    current_chunk = [word]
+                    current_length = word_len
+                    continue
+            
+            chunks.append(chunk_text)
+            current_chunk = [word]
+            current_length = word_len
+        else:
+            current_chunk.append(word)
+            current_length += word_len
+    
+    if current_chunk:
+        chunk_text = " ".join(current_chunk)
+        if len(chunk_text) < MIN_CHARS_PER_CHUNK and chunks:
+            chunks[-1] += " " + chunk_text
+        else:
+            chunks.append(chunk_text)
+    
+    return chunks
+
+def preprocess_text(text: str) -> List[str]:
+    """Preprocessing tối ưu với chunk size thông minh"""
+    clean = normalize_text_vn(text)
+    sentences = split_into_sentences(clean)
+    
+    if not sentences:
+        s = ensure_punctuation(clean)
+        return [ensure_leading_dot(s)]
+    
+    chunks = []
+    buffer = ""
+    
+    for i, sent in enumerate(sentences, 1):
+        sent = ensure_punctuation(sent)
+        sent = re.sub(r'^([^\w]*\w[^,]{0,10}),\s*', r'\1 ', sent)
+        
+        if i <= 5:
+            if len(sent) > MAX_CHARS_PER_CHUNK:
+                chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(sent)])
+            else:
+                chunks.append(ensure_leading_dot(sent))
+        else:
+            if len(sent) > MAX_CHARS_PER_CHUNK:
+                if buffer:
+                    chunks.append(ensure_leading_dot(buffer))
+                    buffer = ""
+                chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(sent)])
+            else:
+                if buffer and len(buffer) + len(sent) + 1 > OPTIMAL_CHUNK_SIZE:
+                    chunks.append(ensure_leading_dot(buffer))
+                    buffer = sent
+                elif buffer:
+                    buffer += " " + sent
+                else:
+                    buffer = sent
+    
+    if buffer:
+        if len(buffer) > MAX_CHARS_PER_CHUNK:
+            chunks.extend([ensure_leading_dot(s) for s in smart_chunk_split(buffer)])
+        else:
+            chunks.append(ensure_leading_dot(ensure_punctuation(buffer)))
+    
+    return chunks
+
+# ============================================================
+# END EMBEDDED PREPROCESS MODULE
+# ============================================================
 
 # ===== Config =====
 MODEL_ID  = os.getenv("MODEL_ID", "DragonLineageAI/Vi-SparkTTS-0.5B")
@@ -60,7 +201,6 @@ def validate_audio_output(audio: np.ndarray, sr: int, chunk_text: str) -> bool:
     if audio is None or len(audio) == 0:
         return False
     
-    # Quick amplitude check
     max_amp = np.max(np.abs(audio))
     if max_amp < 0.001:
         logger.warning(f"Audio too quiet: max_amp={max_amp}")
@@ -70,8 +210,8 @@ def validate_audio_output(audio: np.ndarray, sr: int, chunk_text: str) -> bool:
 
 def join_with_pause(a: np.ndarray, b: np.ndarray, sr: int,
                     gap_sec: float = 0.2, fade_sec: float = 0.1):
-    """Ghép audio với pause và fade - tăng gap để tránh overlap"""
-    gap_n  = max(int(sr * 0.1), int(sr * gap_sec))  # Minimum 0.1s gap
+    """Ghép audio với pause và fade"""
+    gap_n  = max(int(sr * 0.1), int(sr * gap_sec))
     fade_n = max(0, int(sr * fade_sec))
 
     if a.ndim == 2:
@@ -159,7 +299,7 @@ def handler(job):
     outfile  = inp.get("outfile")
     prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này.")
 
-    # Preprocess text using imported function
+    # Preprocess text
     try:
         chunks = preprocess_text(text)
         logger.info(f"[HANDLER] Preprocessed into {len(chunks)} chunks")
