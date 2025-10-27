@@ -297,7 +297,7 @@ def handler(job):
     fade_sec = max(0.05, min(0.5, float(inp.get("fade_sec", 0.1))))
     ret_mode = inp.get("return", "path")
     outfile  = inp.get("outfile")
-    prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này.")
+    prompt_transcript = inp.get("prompt_transcript", " chủ sở hữu giọng nói này, và tôi đồng ý cho Google sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
 
     # Preprocess text
     try:
