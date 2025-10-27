@@ -262,7 +262,8 @@ else:
 
 @app.get("/ping")
 async def ping():
-    return {"status": "healthy"}
+    # Load balancer expect HTTP status code, không cần JSON
+    return Response(status_code=200)
 
 @app.post("/tts")
 async def tts(payload: dict):
