@@ -309,7 +309,7 @@ processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, toke
 model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN).to(DEVICE).eval()
 
 # CRITICAL: Link processor to model for voice cloning
-processor.link_model(model)
+processor.model = model
 logger.info("[INIT] ✅ Processor linked to model")
 
 # ===== Find prompt audio =====
@@ -396,8 +396,7 @@ def handler(job):
                     proc_args["prompt_speech_path"] = active_prompt_path
                     proc_args["prompt_text"] = prompt_transcript
                 
-                inputs = processor(**proc_args)
-                inputs = {k: (v.to(DEVICE) if hasattr(v, "to") else v) for k, v in inputs.items()}
+                inputs = processor(**proc_args).to(DEVICE)
                 
                 in_tok = inputs["input_ids"].shape[-1]
                 total_in += in_tok
@@ -435,7 +434,8 @@ def handler(job):
                 audio_dict = processor.decode(
                     generated_ids=output_ids,
                     global_token_ids_prompt=global_tokens,  # Truyền riêng ở đây
-                    input_ids_len=in_tok
+                    input_ids_len=in_tok,
+                    return_type="np"
                 )
                 
                 audio = np.asarray(audio_dict["audio"], dtype=np.float32)
@@ -484,7 +484,10 @@ def handler(job):
             "successful_chunks": successful_chunks
         }
 
-    full_audio = normalize_peak(full_audio)
+    max_val = np.max(np.abs(full_audio))
+    if max_val > 0.98:
+        full_audio = full_audio * (0.95 / max_val)
+
     final_duration = len(full_audio) / TARGET_SR
     
     os.makedirs(OUT_DIR, exist_ok=True)
