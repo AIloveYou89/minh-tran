@@ -368,7 +368,7 @@ def handler(job):
     total_in = total_out = 0
     successful_chunks = 0
 
-    # Process each chunk
+        # Process each chunk
     for idx, chunk in enumerate(chunks):
         chunk = chunk.strip()
         if not chunk:
@@ -402,49 +402,41 @@ def handler(job):
                 in_tok = inputs["input_ids"].shape[-1]
                 total_in += in_tok
 
-                # Global tokens handling
+                # ✅ FIX: Global tokens handling (copy từ rendervideo.py)
                 if idx == 0:
-                    global_tokens = inputs.get("global_token_ids_prompt", None)
+                    # Chunk đầu tiên: lấy global_tokens và lưu lại
+                    global_tokens = inputs.pop("global_token_ids_prompt", None)
                     if global_tokens is not None:
-                        logger.info(f"[HANDLER] Global tokens shape: {global_tokens.shape}")
+                        logger.info(f"[HANDLER] Global tokens initialized: {global_tokens.shape}")
                 else:
+                    # Các chunk sau: XÓA global_tokens khỏi inputs
                     _ = inputs.pop("global_token_ids_prompt", None)
 
                 max_new = calc_max_new(chunk, in_tok)
 
-                # Generate
-                gen_kwargs = {
-                    **inputs,
-                    "max_new_tokens": max_new,
-                    "do_sample": True,
-                    "temperature": 0.7,
-                    "top_k": 50,
-                    "top_p": 0.8,
-                    "repetition_penalty": 1.1,
-                    "eos_token_id": processor.tokenizer.eos_token_id,
-                    "pad_token_id": processor.tokenizer.pad_token_id
-                }
-                
-                if idx > 0 and global_tokens is not None:
-                    gen_kwargs["global_token_ids_prompt"] = global_tokens
-
+                # ✅ FIX: Generate - CHỈ truyền inputs, KHÔNG truyền global_tokens
                 with torch.no_grad():
-                    output_ids = model.generate(**gen_kwargs)
+                    output_ids = model.generate(
+                        **inputs,  # Chỉ truyền inputs đã xử lý
+                        max_new_tokens=max_new,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_k=50,
+                        top_p=0.8,
+                        repetition_penalty=1.1,
+                        eos_token_id=processor.tokenizer.eos_token_id,
+                        pad_token_id=processor.tokenizer.pad_token_id
+                    )
 
                 out_tok = output_ids.shape[-1]
                 total_out += out_tok
 
-                # Decode audio
-                decode_kwargs = {
-                    "generated_ids": output_ids,
-                    "input_ids_len": in_tok,
-                    "return_type": "np"
-                }
-                
-                if global_tokens is not None:
-                    decode_kwargs["global_token_ids_prompt"] = global_tokens
-                
-                audio_dict = processor.decode(**decode_kwargs)
+                # ✅ FIX: Decode - truyền global_tokens riêng (giống rendervideo.py)
+                audio_dict = processor.decode(
+                    generated_ids=output_ids,
+                    global_token_ids_prompt=global_tokens,  # Truyền riêng ở đây
+                    input_ids_len=in_tok
+                )
                 
                 audio = np.asarray(audio_dict["audio"], dtype=np.float32)
                 sr_in = int(audio_dict.get("sampling_rate", TARGET_SR))
@@ -485,7 +477,6 @@ def handler(job):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
-
     if full_audio is None or successful_chunks == 0:
         return {
             "error": f"TTS failed. Success: {successful_chunks}/{len(chunks)}",
