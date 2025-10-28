@@ -1,4 +1,4 @@
-# rp_handler.py - RunPod Serverless with Network Volume Support
+# rp_handler.py - RunPod Serverless with Network Volume Support - FIXED AUDIO QUALITY
 import os, io, uuid, base64, numpy as np, soundfile as sf, torch, torchaudio
 from transformers import AutoProcessor, AutoModel
 import runpod
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 MIN_CHARS_PER_CHUNK = 50
 MAX_CHARS_PER_CHUNK = 130
 OPTIMAL_CHUNK_SIZE = 80
-PUNCS = r".?!â€¦"
+PUNCS = r".?!…"
 
 _number_pattern = re.compile(r"(\d{1,3}(?:\.\d{3})*)(?:\s*(%|[^\W\d_]+))?", re.UNICODE)
 _whitespace_pattern = re.compile(r"\s+")
@@ -163,8 +163,8 @@ TARGET_SR = int(os.getenv("TARGET_SR", "24000"))
 # ===== CRITICAL: Network Volume Path Detection =====
 def detect_network_volume_path() -> Optional[str]:
     """
-    Tá»± Ä‘á»™ng detect Network Volume path trong RunPod Serverless
-    RunPod mount network volume táº¡i /runpod-volume khi Ä‘Æ°á»£c attach
+    Tự động detect Network Volume path trong RunPod Serverless
+    RunPod mount network volume tại /runpod-volume khi được attach
     """
     possible_roots = [
         "/runpod-volume",  # Default RunPod network volume mount point
@@ -174,10 +174,10 @@ def detect_network_volume_path() -> Optional[str]:
     
     for root in possible_roots:
         if root and os.path.exists(root) and os.path.isdir(root):
-            logger.info(f"[VOLUME] âœ… Found Network Volume at: {root}")
+            logger.info(f"[VOLUME] ✓ Found Network Volume at: {root}")
             return root
     
-    logger.warning("[VOLUME] âš ï¸ No Network Volume detected. Prompt voice will not be available.")
+    logger.warning("[VOLUME] ⚠️ No Network Volume detected. Prompt voice will not be available.")
     return None
 
 NV_ROOT = detect_network_volume_path()
@@ -185,13 +185,13 @@ NV_ROOT = detect_network_volume_path()
 # ===== Prompt Audio Path Detection =====
 def find_prompt_audio() -> Optional[str]:
     """
-    TÃ¬m prompt audio trong Network Volume vá»›i nhiá»u fallback paths
+    Tìm prompt audio trong Network Volume với nhiều fallback paths
     """
     if not NV_ROOT:
         logger.warning("[PROMPT] No Network Volume, cannot load prompt audio")
         return None
     
-    # CÃ¡c Ä‘Æ°á»ng dáº«n cÃ³ thá»ƒ cÃ³
+    # Các đường dẫn có thể có
     possible_paths = [
         os.path.join(NV_ROOT, "workspace/consent_audio.wav"),
         os.path.join(NV_ROOT, "consent_audio.wav"),
@@ -218,7 +218,7 @@ def find_prompt_audio() -> Optional[str]:
                     logger.warning(f"[PROMPT] Too quiet (max_amp={max_amp}): {path}")
                     continue
                 
-                logger.info(f"[PROMPT] âœ… Found valid prompt: {path}")
+                logger.info(f"[PROMPT] ✓ Found valid prompt: {path}")
                 logger.info(f"[PROMPT] Duration: {duration:.2f}s, Sample rate: {sr}, Max amplitude: {max_amp:.4f}")
                 return path
                 
@@ -226,7 +226,7 @@ def find_prompt_audio() -> Optional[str]:
                 logger.error(f"[PROMPT] Error reading {path}: {e}")
                 continue
     
-    logger.warning(f"[PROMPT] âš ï¸ No valid prompt audio found in: {possible_paths}")
+    logger.warning(f"[PROMPT] ⚠️ No valid prompt audio found in: {possible_paths}")
     return None
 
 # Output directory
@@ -234,6 +234,7 @@ OUT_DIR = os.path.join(NV_ROOT, "jobs") if NV_ROOT else "/tmp/jobs"
 
 # ===== Helper Functions =====
 def calc_max_new(text: str, in_tok: int, base_ratio: float = 2.5, cap: int = 1800) -> int:
+    """Tính max_new_tokens thông minh - GIỐNG RENDERVIDEO.PY"""
     text_len = len(text.strip())
     
     if text_len < 50:
@@ -255,19 +256,23 @@ def calc_max_new(text: str, in_tok: int, base_ratio: float = 2.5, cap: int = 180
     return final_max
 
 def validate_audio_output(audio: np.ndarray, sr: int, chunk_text: str) -> bool:
+    """Fast audio validation - GIỐNG RENDERVIDEO.PY"""
     if audio is None or len(audio) == 0:
         return False
     
+    # Quick amplitude check only
     max_amp = np.max(np.abs(audio))
     if max_amp < 0.001:
         logger.warning(f"Audio too quiet: max_amp={max_amp}")
         return False
     
+    # Skip duration check for speed
     return True
 
 def join_with_pause(a: np.ndarray, b: np.ndarray, sr: int,
                     gap_sec: float = 0.2, fade_sec: float = 0.1):
-    gap_n  = max(int(sr * 0.1), int(sr * gap_sec))
+    """Ghép audio với pause và fade - TĂNG GAP ĐỂ TRÁNH OVERLAP"""
+    gap_n  = max(int(sr * 0.1), int(sr * gap_sec))  # Minimum 0.1s gap
     fade_n = max(0, int(sr * fade_sec))
 
     if a.ndim == 2:
@@ -291,10 +296,13 @@ def join_with_pause(a: np.ndarray, b: np.ndarray, sr: int,
     return np.concatenate([a[:-fade_n], a_tail, silence, b_head, b[fade_n:]], axis=0)
 
 def normalize_peak(x: np.ndarray, peak=0.95):
+    """Normalize audio peak - GIỐNG RENDERVIDEO.PY"""
     if x is None or x.size == 0: 
         return x
-    m = float(np.max(np.abs(x)))
-    return (x / m * peak).astype(np.float32) if m > 0 else x
+    max_val = float(np.max(np.abs(x)))
+    if max_val > 0.98:  # Only normalize if really clipping
+        return (x * (peak / max_val)).astype(np.float32)
+    return x
 
 def resample_np(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     if sr_in == sr_out: 
@@ -309,20 +317,20 @@ processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, toke
 model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN).to(DEVICE).eval()
 
 # CRITICAL: Link processor to model for voice cloning
-processor.link_model(model)
-logger.info("[INIT] âœ… Processor linked to model")
+processor.model = model  # FIXED: Giống rendervideo.py
+logger.info("[INIT] ✓ Processor linked to model")
 
 # ===== Find prompt audio =====
 PROMPT_PATH = find_prompt_audio()
 if PROMPT_PATH:
-    logger.info(f"[INIT] âœ… Prompt audio ready: {PROMPT_PATH}")
+    logger.info(f"[INIT] ✓ Prompt audio ready: {PROMPT_PATH}")
 else:
-    logger.warning("[INIT] âš ï¸ Running without prompt audio (will use default voice)")
+    logger.warning("[INIT] ⚠️ Running without prompt audio (will use default voice)")
 
 # ===== Runpod handler =====
 def handler(job):
     """
-    Enhanced handler with Network Volume support
+    Enhanced handler with Network Volume support - FIXED AUDIO QUALITY
     """
     inp = job["input"] or {}
     text = (inp.get("text") or "").strip()
@@ -341,7 +349,7 @@ def handler(job):
     
     # Prompt configuration
     custom_prompt_path = inp.get("prompt_path")
-    prompt_transcript = inp.get("prompt_transcript", "TÃ´i lÃ  chá»§ sá»Ÿ há»¯u giá»ng nÃ³i nÃ y, vÃ  tÃ´i Ä‘á»“ng Ã½ cho Google sá»­ dá»¥ng giá»ng nÃ³i nÃ y Ä‘á»ƒ táº¡o mÃ´ hÃ¬nh giá»ng nÃ³i tá»•ng há»£p.")
+    prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này, và tôi đồng ý cho Google sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
     
     # Determine active prompt path
     active_prompt_path = None
@@ -352,7 +360,7 @@ def handler(job):
         active_prompt_path = PROMPT_PATH
         logger.info(f"[HANDLER] Using default prompt: {PROMPT_PATH}")
     else:
-        logger.warning("[HANDLER] âš ï¸ No prompt audio available, using default voice")
+        logger.warning("[HANDLER] ⚠️ No prompt audio available, using default voice")
 
     # Preprocess text
     try:
@@ -368,13 +376,15 @@ def handler(job):
     total_in = total_out = 0
     successful_chunks = 0
 
-        # Process each chunk
+    # Process each chunk - FIXED LOGIC GIỐNG RENDERVIDEO.PY
     for idx, chunk in enumerate(chunks):
         chunk = chunk.strip()
         if not chunk:
+            logger.warning(f"[HANDLER] Skipping empty chunk {idx+1}")
             continue
             
         logger.info(f"[HANDLER] Processing Chunk {idx+1}/{len(chunks)}: {len(chunk)} chars")
+        logger.info(f"[HANDLER] Chunk text preview: {chunk[:100]}...")
         
         retry_count = 0
         max_retries = 2
@@ -402,22 +412,22 @@ def handler(job):
                 in_tok = inputs["input_ids"].shape[-1]
                 total_in += in_tok
 
-                # âœ… FIX: Global tokens handling (copy tá»« rendervideo.py)
+                # ✅ FIX: Global tokens handling - GIỐNG RENDERVIDEO.PY
                 if idx == 0:
-                    # Chunk Ä‘áº§u tiÃªn: láº¥y global_tokens vÃ  lÆ°u láº¡i
+                    # Chunk đầu tiên: lấy global_tokens và lưu lại
                     global_tokens = inputs.pop("global_token_ids_prompt", None)
                     if global_tokens is not None:
                         logger.info(f"[HANDLER] Global tokens initialized: {global_tokens.shape}")
                 else:
-                    # CÃ¡c chunk sau: XÃ“A global_tokens khá»i inputs
+                    # Các chunk sau: XÓA global_tokens khỏi inputs
                     _ = inputs.pop("global_token_ids_prompt", None)
 
                 max_new = calc_max_new(chunk, in_tok)
 
-                # âœ… FIX: Generate - CHá»ˆ truyá»n inputs, KHÃ”NG truyá»n global_tokens
+                # ✅ FIX: Generate - CHỈ truyền inputs, KHÔNG truyền global_tokens
                 with torch.no_grad():
                     output_ids = model.generate(
-                        **inputs,  # Chá»‰ truyá»n inputs Ä‘Ã£ xá»­ lÃ½
+                        **inputs,  # Chỉ truyền inputs đã xử lý
                         max_new_tokens=max_new,
                         do_sample=True,
                         temperature=0.7,
@@ -430,11 +440,13 @@ def handler(job):
 
                 out_tok = output_ids.shape[-1]
                 total_out += out_tok
+                
+                logger.info(f"[HANDLER] Generated {out_tok} tokens (input: {in_tok})")
 
-                # âœ… FIX: Decode - truyá»n global_tokens riÃªng (giá»‘ng rendervideo.py)
+                # ✅ FIX: Decode - truyền global_tokens riêng (giống rendervideo.py)
                 audio_dict = processor.decode(
                     generated_ids=output_ids,
-                    global_token_ids_prompt=global_tokens,  # Truyá»n riÃªng á»Ÿ Ä‘Ã¢y
+                    global_token_ids_prompt=global_tokens,  # Truyền riêng ở đây
                     input_ids_len=in_tok
                 )
                 
@@ -446,20 +458,25 @@ def handler(job):
 
                 if validate_audio_output(audio, TARGET_SR, chunk):
                     chunk_audio = audio
+                    if sr is None:
+                        sr = TARGET_SR
+                    elif sr != TARGET_SR:
+                        logger.warning(f"[HANDLER] Sample rate mismatch: {sr} vs {TARGET_SR}")
+                    
                     successful_chunks += 1
-                    logger.info(f"[HANDLER] Chunk {idx+1} SUCCESS: {len(audio)/TARGET_SR:.2f}s")
+                    logger.info(f"[HANDLER] Chunk {idx+1} SUCCESS: {len(audio)/TARGET_SR:.2f}s audio")
                     break
                 else:
                     retry_count += 1
                     if retry_count <= max_retries:
-                        logger.warning(f"[HANDLER] Retry {retry_count}/{max_retries}")
+                        logger.warning(f"[HANDLER] Chunk {idx+1} failed validation, retrying ({retry_count}/{max_retries})")
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
                         gc.collect()
                     
             except Exception as e:
                 retry_count += 1
-                logger.error(f"[HANDLER] Chunk {idx+1} error: {e}")
+                logger.error(f"[HANDLER] Chunk {idx+1} error (attempt {retry_count}): {e}")
                 if retry_count <= max_retries:
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
@@ -471,12 +488,14 @@ def handler(job):
                 full_audio = chunk_audio
             else:
                 full_audio = join_with_pause(full_audio, chunk_audio, TARGET_SR, gap_sec, fade_sec)
+                logger.info(f"[HANDLER] Combined audio length: {len(full_audio)/TARGET_SR:.2f}s")
         else:
-            logger.error(f"[HANDLER] Failed chunk {idx+1}")
+            logger.error(f"[HANDLER] Failed to generate valid audio for chunk {idx+1} after {max_retries} retries")
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+
     if full_audio is None or successful_chunks == 0:
         return {
             "error": f"TTS failed. Success: {successful_chunks}/{len(chunks)}",
@@ -484,7 +503,8 @@ def handler(job):
             "successful_chunks": successful_chunks
         }
 
-    full_audio = normalize_peak(full_audio)
+    # ✅ FIX: Normalize audio giống rendervideo.py
+    full_audio = normalize_peak(full_audio, peak=0.95)
     final_duration = len(full_audio) / TARGET_SR
     
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -493,7 +513,7 @@ def handler(job):
     out_path = os.path.join(OUT_DIR, name)
     
     sf.write(out_path, full_audio, TARGET_SR)
-    logger.info(f"[HANDLER] âœ… Saved: {out_path}, duration: {final_duration:.2f}s")
+    logger.info(f"[HANDLER] ✅ Saved: {out_path}, duration: {final_duration:.2f}s")
 
     result = {
         "job_id": job_id,
