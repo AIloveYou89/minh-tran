@@ -22,4 +22,4 @@ ENV MODEL_ID="hynt/Zipformer-30M-RNNT-6000h" \
     OUT_DIR="/runpod-volume/jobs" \
     NUM_THREADS="1"
 
-CMD ["python", "-u", "rp_handler.py"]
+CMD ["python", "-u", "sp_handler.py"]
