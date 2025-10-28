@@ -1,7 +1,0 @@
-runpod>=1.7.9
-sherpa-onnx
-sherpa-onnx-bin
-huggingface_hub>=0.23
-ffmpeg-python
-soundfile
-numpy
