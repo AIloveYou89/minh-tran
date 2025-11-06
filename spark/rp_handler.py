@@ -438,6 +438,7 @@ def handler(job):
                 if idx == 0:
                     global_tokens = inputs.pop("global_token_ids_prompt", None)
                     if global_tokens is not None:
+                        global_tokens = global_tokens.to(DEVICE)
                         logger.info(f"[HANDLER] Global tokens initialized: {global_tokens.shape}")
                 else:
                     _ = inputs.pop("global_token_ids_prompt", None)
@@ -464,6 +465,7 @@ def handler(job):
                 logger.info(f"[HANDLER] Generated {out_tok} tokens (input: {in_tok})")
 
                 # Decode (GIỐNG HỆT HANDLER 9)
+                output_ids = output_ids.to(DEVICE)
                 audio_dict = processor.decode(
                     generated_ids=output_ids,
                     global_token_ids_prompt=global_tokens,
