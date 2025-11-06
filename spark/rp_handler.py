@@ -1,4 +1,4 @@
-# rp_handler_optimized.py - OPTIMIZED từ handler(9).py - GIỮ NGUYÊN LOGIC
+# rp_handler_13.py - ANTI CPU FALLBACK VERSION
 import os, io, uuid, base64, numpy as np, soundfile as sf, torch, torchaudio
 from transformers import AutoProcessor, AutoModel
 import runpod
@@ -14,12 +14,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# EMBEDDED PREPROCESS MODULE (GIỐNG HỆT HANDLER 9)
+# EMBEDDED PREPROCESS MODULE
 # ============================================================
-# ✅ TỐI ƯU CHO VÄN BẢN DÀI: Tăng chunk size để giảm số lượng chunks
-MIN_CHARS_PER_CHUNK = 80   # Tăng từ 50
-MAX_CHARS_PER_CHUNK = 200  # Tăng từ 130
-OPTIMAL_CHUNK_SIZE = 150   # Tăng từ 80
+MIN_CHARS_PER_CHUNK = 80
+MAX_CHARS_PER_CHUNK = 200
+OPTIMAL_CHUNK_SIZE = 150
 PUNCS = r".?!…"
 
 _number_pattern = re.compile(r"(\d{1,3}(?:\.\d{3})*)(?:\s*(%|[^\W\d_]+))?", re.UNICODE)
@@ -150,7 +149,7 @@ def preprocess_text(text: str) -> List[str]:
     return chunks
 
 # ============================================================
-# CONFIG (GIỐNG HỆT HANDLER 9)
+# CONFIG
 # ============================================================
 MODEL_ID  = os.getenv("MODEL_ID", "DragonLineageAI/Vi-SparkTTS-0.5B")
 HF_TOKEN  = os.getenv("HF_TOKEN")
@@ -161,7 +160,7 @@ DEVICE    = "cuda"
 TARGET_SR = int(os.getenv("TARGET_SR", "24000"))
 
 # ============================================================
-# NETWORK VOLUME (GIỐNG HỆT HANDLER 9)
+# NETWORK VOLUME
 # ============================================================
 def detect_network_volume_path() -> Optional[str]:
     possible_roots = [
@@ -175,7 +174,7 @@ def detect_network_volume_path() -> Optional[str]:
             logger.info(f"[VOLUME] ✓ Found Network Volume at: {root}")
             return root
     
-    logger.warning("[VOLUME] ⚠️ No Network Volume detected. Prompt voice will not be available.")
+    logger.warning("[VOLUME] ⚠️ No Network Volume detected.")
     return None
 
 NV_ROOT = detect_network_volume_path()
@@ -197,34 +196,31 @@ def find_prompt_audio() -> Optional[str]:
             try:
                 audio_data, sr = sf.read(path)
                 if len(audio_data) == 0:
-                    logger.warning(f"[PROMPT] Empty audio: {path}")
                     continue
                 
                 duration = len(audio_data) / sr
                 if duration < 1.0:
-                    logger.warning(f"[PROMPT] Too short ({duration:.2f}s): {path}")
                     continue
                 
                 max_amp = np.max(np.abs(audio_data))
                 if max_amp < 0.001:
-                    logger.warning(f"[PROMPT] Too quiet (max_amp={max_amp}): {path}")
                     continue
                 
                 logger.info(f"[PROMPT] ✓ Found valid prompt: {path}")
-                logger.info(f"[PROMPT] Duration: {duration:.2f}s, Sample rate: {sr}, Max amplitude: {max_amp:.4f}")
+                logger.info(f"[PROMPT] Duration: {duration:.2f}s, SR: {sr}, Amp: {max_amp:.4f}")
                 return path
                 
             except Exception as e:
                 logger.error(f"[PROMPT] Error reading {path}: {e}")
                 continue
     
-    logger.warning(f"[PROMPT] ⚠️ No valid prompt audio found in: {possible_paths}")
+    logger.warning(f"[PROMPT] ⚠️ No valid prompt audio found")
     return None
 
 OUT_DIR = os.path.join(NV_ROOT, "jobs") if NV_ROOT else "/tmp/jobs"
 
 # ============================================================
-# HELPER FUNCTIONS (GIỐNG HỆT HANDLER 9)
+# HELPER FUNCTIONS
 # ============================================================
 def calc_max_new(text: str, in_tok: int, base_ratio: float = 2.5, cap: int = 1800) -> int:
     text_len = len(text.strip())
@@ -299,56 +295,126 @@ def resample_np(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     return out.squeeze(0).numpy()
 
 # ============================================================
-# MODEL LOADING (THÊM WARM-UP & TIMING)
+# 🔥 ANTI CPU FALLBACK UTILITIES
+# ============================================================
+def verify_cuda_available():
+    """Kiểm tra CUDA còn available không"""
+    if not torch.cuda.is_available():
+        raise RuntimeError("❌ CUDA not available!")
+    return True
+
+def verify_model_on_gpu(model):
+    """Kiểm tra model có còn trên GPU không"""
+    try:
+        device = str(next(model.parameters()).device)
+        if "cuda" not in device:
+            raise RuntimeError(f"❌ Model moved to CPU! Device: {device}")
+        return True
+    except Exception as e:
+        raise RuntimeError(f"❌ Cannot verify model device: {e}")
+
+def force_model_to_gpu(model, device="cuda"):
+    """Force model về GPU nếu bị move sang CPU"""
+    try:
+        model = model.to(device)
+        # Verify
+        verify_model_on_gpu(model)
+        logger.info(f"✅ Model forced back to {device}")
+        return model
+    except Exception as e:
+        raise RuntimeError(f"❌ Cannot move model to GPU: {e}")
+
+def ensure_tensor_on_device(tensor, device="cuda"):
+    """Đảm bảo tensor ở đúng device"""
+    if tensor is None:
+        return None
+    if hasattr(tensor, "to"):
+        return tensor.to(device)
+    return tensor
+
+# ============================================================
+# MODEL LOADING - ANTI CPU FALLBACK VERSION
 # ============================================================
 logger.info(f"[INIT] Loading {MODEL_ID} on {DEVICE}")
 init_start = time.time()
 
-processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN)
+# ✅ Set CUDA default device trước
+torch.cuda.set_device(0)
+logger.info(f"[INIT] Default CUDA device set to: {torch.cuda.current_device()}")
+
+# ✅ Load processor
+processor = AutoProcessor.from_pretrained(
+    MODEL_ID, 
+    trust_remote_code=True, 
+    token=HF_TOKEN
+)
+
+# ✅ Load model - KHÔNG DÙNG device_map, torch_dtype
 model = AutoModel.from_pretrained(
     MODEL_ID, 
     trust_remote_code=True, 
-    token=HF_TOKEN,
-    torch_dtype=torch.float16,  # ✅ Thêm dòng này
-    device_map="cuda"            # ✅ Thêm dòng này
-).eval()
+    token=HF_TOKEN
+)
+
+# ✅ FORCE model lên GPU và freeze
+model = model.to(DEVICE)
+model.eval()
+model.requires_grad_(False)  # Freeze để tránh autograd tự move sang CPU
+
+# ✅ Verify model trên GPU
+verify_model_on_gpu(model)
+logger.info(f"[INIT] ✅ Model confirmed on device: {next(model.parameters()).device}")
 
 processor.model = model
 logger.info("[INIT] ✓ Processor linked to model")
+
+# ✅ Pin model parameters để tránh bị swap
+for param in model.parameters():
+    param.data = param.data.pin_memory()
+logger.info("[INIT] ✅ Model parameters pinned to memory")
 
 PROMPT_PATH = find_prompt_audio()
 if PROMPT_PATH:
     logger.info(f"[INIT] ✓ Prompt audio ready: {PROMPT_PATH}")
 else:
-    logger.warning("[INIT] ⚠️ Running without prompt audio (will use default voice)")
+    logger.warning("[INIT] ⚠️ Running without prompt audio")
 
 init_time = time.time() - init_start
 logger.info(f"[INIT] Model loaded in {init_time:.2f}s")
 
-# ✅ WARM-UP: Chạy 1 inference nhỏ để tránh cold start penalty
+# ✅ WARM-UP
 logger.info("[INIT] Warming up model...")
 try:
     warmup_text = ". xin chào"
     warmup_inputs = processor(text=warmup_text, return_tensors="pt")
-    warmup_inputs = {k: (v.to(DEVICE) if hasattr(v, "to") else v) for k, v in warmup_inputs.items()}
+    warmup_inputs = {k: ensure_tensor_on_device(v, DEVICE) for k, v in warmup_inputs.items()}
     _ = warmup_inputs.pop("global_token_ids_prompt", None)
     
     with torch.no_grad():
         _ = model.generate(**warmup_inputs, max_new_tokens=50, do_sample=False)
     
+    verify_model_on_gpu(model)
     torch.cuda.empty_cache()
-    logger.info("[INIT] ✅ Warmup complete")
+    logger.info("[INIT] ✅ Warmup complete, model still on GPU")
 except Exception as e:
-    logger.warning(f"[INIT] Warmup failed (non-critical): {e}")
+    logger.warning(f"[INIT] Warmup failed: {e}")
 
 # ============================================================
-# HANDLER - GIỮ NGUYÊN LOGIC HANDLER(9), CHỈ THÊM TIMING
+# HANDLER - ANTI CPU FALLBACK VERSION
 # ============================================================
 def handler(job):
     """
-    Enhanced handler - GIỮ NGUYÊN LOGIC CŨ, chỉ thêm timing & tối ưu nhỏ
+    Handler with aggressive CPU fallback prevention
     """
     job_start = time.time()
+    
+    # ✅ Pre-check GPU
+    try:
+        verify_cuda_available()
+        verify_model_on_gpu(model)
+    except Exception as e:
+        logger.error(f"[HANDLER] GPU check failed at start: {e}")
+        return {"error": str(e)}
     
     inp = job["input"] or {}
     text = (inp.get("text") or "").strip()
@@ -356,31 +422,26 @@ def handler(job):
     if not text:
         return {"error": "Missing 'text'."}
 
-    # ✅ KHÔNG GIỚI HẠN độ dài văn bản - xử lý được văn bản cực dài
-    if len(text) > 500000:  # Chỉ giới hạn ở mức cực cao để tránh OOM
-        return {"error": "Text too long (max 500,000 characters = ~100,000 words)"}
+    if len(text) > 500000:
+        return {"error": "Text too long (max 500,000 characters)"}
 
-    # Parameters (GIỐNG HỆT HANDLER 9)
+    # Parameters
     gap_sec  = max(0.1, min(1.0, float(inp.get("gap_sec", 0.2))))
     fade_sec = max(0.05, min(0.5, float(inp.get("fade_sec", 0.1))))
     ret_mode = inp.get("return", "path")
     outfile  = inp.get("outfile")
     
-    # Prompt configuration (GIỐNG HỆT HANDLER 9)
+    # Prompt configuration
     custom_prompt_path = inp.get("prompt_path")
     prompt_transcript = inp.get("prompt_transcript", "Tôi là chủ sở hữu giọng nói này, và tôi đồng ý cho Google sử dụng giọng nói này để tạo mô hình giọng nói tổng hợp.")
     
     active_prompt_path = None
     if custom_prompt_path and os.path.exists(custom_prompt_path):
         active_prompt_path = custom_prompt_path
-        logger.info(f"[HANDLER] Using custom prompt: {custom_prompt_path}")
     elif PROMPT_PATH:
         active_prompt_path = PROMPT_PATH
-        logger.info(f"[HANDLER] Using default prompt: {PROMPT_PATH}")
-    else:
-        logger.warning("[HANDLER] ⚠️ No prompt audio available, using default voice")
 
-    # Preprocess text (GIỐNG HỆT HANDLER 9)
+    # Preprocess text
     preprocess_start = time.time()
     try:
         chunks = preprocess_text(text)
@@ -395,8 +456,7 @@ def handler(job):
     global_tokens = None
     total_in = total_out = 0
     successful_chunks = 0
-
-    # ✅ GIỐNG HỆT HANDLER(9) - CHỈ THÊM TIMING
+    
     generation_start = time.time()
     
     for idx, chunk in enumerate(chunks):
@@ -404,48 +464,70 @@ def handler(job):
         if not chunk:
             logger.warning(f"[HANDLER] Skipping empty chunk {idx+1}")
             continue
-            
+        
+        # ✅ CHECK GPU TRƯỚC MỖI CHUNK
+        try:
+            verify_cuda_available()
+            verify_model_on_gpu(model)
+        except Exception as e:
+            logger.error(f"[HANDLER] GPU check failed at chunk {idx+1}: {e}")
+            # Try to recover
+            try:
+                global model
+                model = force_model_to_gpu(model, DEVICE)
+                logger.warning(f"[HANDLER] ⚠️ Model recovered to GPU for chunk {idx+1}")
+            except:
+                return {
+                    "error": f"GPU lost at chunk {idx+1}/{len(chunks)}",
+                    "successful_chunks": successful_chunks,
+                    "total_chunks": len(chunks)
+                }
+        
         chunk_start = time.time()
         logger.info(f"[HANDLER] Processing Chunk {idx+1}/{len(chunks)}: {len(chunk)} chars")
         
-        # ✅ GIẢM RETRIES = 0 cho văn bản dài (chấp nhận 1 chunk fail, tiếp tục xử lý)
-        retry_count = 0
-        max_retries = 0  # Không retry để nhanh hơn với văn bản dài
         chunk_audio = None
         
-        while retry_count <= max_retries and chunk_audio is None:
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                
-                # Prepare inputs (GIỐNG HỆT HANDLER 9)
-                proc_args = {
-                    "text": chunk,
-                    "return_tensors": "pt"
-                }
-                
-                if active_prompt_path:
-                    proc_args["prompt_speech_path"] = active_prompt_path
-                    proc_args["prompt_text"] = prompt_transcript
-                
-                inputs = processor(**proc_args)
-                inputs = {k: (v.to(DEVICE) if hasattr(v, "to") else v) for k, v in inputs.items()}
-                
-                in_tok = inputs["input_ids"].shape[-1]
-                total_in += in_tok
+        try:
+            # ✅ AGGRESSIVE CACHE CLEAR
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # Đợi tất cả operations hoàn thành
+            
+            # Prepare inputs
+            proc_args = {
+                "text": chunk,
+                "return_tensors": "pt"
+            }
+            
+            if active_prompt_path:
+                proc_args["prompt_speech_path"] = active_prompt_path
+                proc_args["prompt_text"] = prompt_transcript
+            
+            inputs = processor(**proc_args)
+            
+            # ✅ FORCE TẤT CẢ INPUTS LÊN GPU
+            inputs = {k: ensure_tensor_on_device(v, DEVICE) for k, v in inputs.items()}
+            
+            in_tok = inputs["input_ids"].shape[-1]
+            total_in += in_tok
 
-                # Global tokens handling (GIỐNG HỆT HANDLER 9)
-                if idx == 0:
-                    global_tokens = inputs.pop("global_token_ids_prompt", None)
-                    if global_tokens is not None:
-                        global_tokens = global_tokens.to(DEVICE)
-                        logger.info(f"[HANDLER] Global tokens initialized: {global_tokens.shape}")
-                else:
-                    _ = inputs.pop("global_token_ids_prompt", None)
+            # Global tokens handling
+            if idx == 0:
+                global_tokens = inputs.pop("global_token_ids_prompt", None)
+                if global_tokens is not None:
+                    global_tokens = ensure_tensor_on_device(global_tokens, DEVICE)
+                    logger.info(f"[HANDLER] Global tokens: {global_tokens.shape} on {global_tokens.device}")
+            else:
+                _ = inputs.pop("global_token_ids_prompt", None)
 
-                max_new = calc_max_new(chunk, in_tok)
+            max_new = calc_max_new(chunk, in_tok)
 
-                # Generate (GIỐNG HỆT HANDLER 9)
+            # ✅ VERIFY TRƯỚC KHI GENERATE
+            verify_model_on_gpu(model)
+            
+            # Generate với context manager để đảm bảo GPU
+            with torch.cuda.device(0):
                 with torch.no_grad():
                     output_ids = model.generate(
                         **inputs,
@@ -459,54 +541,44 @@ def handler(job):
                         pad_token_id=processor.tokenizer.pad_token_id
                     )
 
-                out_tok = output_ids.shape[-1]
-                total_out += out_tok
-                
-                logger.info(f"[HANDLER] Generated {out_tok} tokens (input: {in_tok})")
+            out_tok = output_ids.shape[-1]
+            total_out += out_tok
+            
+            logger.info(f"[HANDLER] Generated {out_tok} tokens (input: {in_tok})")
 
-                # Decode (GIỐNG HỆT HANDLER 9)
-                output_ids = output_ids.to(DEVICE)
-                audio_dict = processor.decode(
-                    generated_ids=output_ids,
-                    global_token_ids_prompt=global_tokens,
-                    input_ids_len=in_tok
-                )
-                
-                audio = np.asarray(audio_dict["audio"], dtype=np.float32)
-                sr_in = int(audio_dict.get("sampling_rate", TARGET_SR))
-                
-                if sr_in != TARGET_SR:
-                    audio = resample_np(audio, sr_in, TARGET_SR)
+            # ✅ ENSURE output_ids trên GPU trước decode
+            output_ids = ensure_tensor_on_device(output_ids, DEVICE)
+            
+            # Decode
+            audio_dict = processor.decode(
+                generated_ids=output_ids,
+                global_token_ids_prompt=global_tokens,
+                input_ids_len=in_tok
+            )
+            
+            audio = np.asarray(audio_dict["audio"], dtype=np.float32)
+            sr_in = int(audio_dict.get("sampling_rate", TARGET_SR))
+            
+            if sr_in != TARGET_SR:
+                audio = resample_np(audio, sr_in, TARGET_SR)
 
-                if validate_audio_output(audio, TARGET_SR, chunk):
-                    chunk_audio = audio
-                    if sr is None:
-                        sr = TARGET_SR
-                    elif sr != TARGET_SR:
-                        logger.warning(f"[HANDLER] Sample rate mismatch: {sr} vs {TARGET_SR}")
-                    
-                    successful_chunks += 1
-                    chunk_time = time.time() - chunk_start
-                    logger.info(f"[HANDLER] Chunk {idx+1} SUCCESS: {len(audio)/TARGET_SR:.2f}s audio ({chunk_time:.2f}s processing)")
-                    break
-                else:
-                    retry_count += 1
-                    if retry_count <= max_retries:
-                        logger.warning(f"[HANDLER] Chunk {idx+1} failed validation, retrying ({retry_count}/{max_retries})")
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                        gc.collect()
-                    
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"[HANDLER] Chunk {idx+1} error (attempt {retry_count}): {e}")
-                if retry_count <= max_retries:
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                    gc.collect()
-                continue
+            if validate_audio_output(audio, TARGET_SR, chunk):
+                chunk_audio = audio
+                successful_chunks += 1
+                chunk_time = time.time() - chunk_start
+                logger.info(f"[HANDLER] Chunk {idx+1} SUCCESS: {len(audio)/TARGET_SR:.2f}s audio ({chunk_time:.2f}s)")
+                
+        except Exception as e:
+            logger.error(f"[HANDLER] Chunk {idx+1} error: {e}")
+            # Try to recover model
+            try:
+                global model
+                model = force_model_to_gpu(model, DEVICE)
+                torch.cuda.empty_cache()
+            except:
+                pass
 
-        # Combine audio (GIỐNG HỆT HANDLER 9)
+        # Combine audio
         if chunk_audio is not None:
             if full_audio is None:
                 full_audio = chunk_audio
@@ -514,12 +586,13 @@ def handler(job):
                 full_audio = join_with_pause(full_audio, chunk_audio, TARGET_SR, gap_sec, fade_sec)
                 logger.info(f"[HANDLER] Combined audio length: {len(full_audio)/TARGET_SR:.2f}s")
         else:
-            logger.error(f"[HANDLER] Failed to generate valid audio for chunk {idx+1} after {max_retries} retries")
+            logger.error(f"[HANDLER] Failed chunk {idx+1}")
 
-        # ✅ CHỈ cleanup memory mỗi 5 chunks (thay vì mỗi chunk) để nhanh hơn
+        # Memory cleanup mỗi 5 chunks
         if (idx + 1) % 5 == 0:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             gc.collect()
 
     generation_time = time.time() - generation_start
@@ -531,7 +604,7 @@ def handler(job):
             "successful_chunks": successful_chunks
         }
 
-    # Normalize and save (GIỐNG HỆT HANDLER 9)
+    # Normalize and save
     full_audio = normalize_peak(full_audio, peak=0.95)
     final_duration = len(full_audio) / TARGET_SR
     
@@ -549,7 +622,6 @@ def handler(job):
     logger.info(f"[HANDLER] ✅ Saved: {out_path}, duration: {final_duration:.2f}s")
     logger.info(f"[TIMING] Total: {total_time:.2f}s | Preprocess: {preprocess_time:.2f}s | Generation: {generation_time:.2f}s | Save: {save_time:.2f}s")
 
-    # Result (THÊM timing metrics)
     result = {
         "job_id": job_id,
         "sample_rate": TARGET_SR,
