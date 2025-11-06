@@ -305,7 +305,13 @@ logger.info(f"[INIT] Loading {MODEL_ID} on {DEVICE}")
 init_start = time.time()
 
 processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN)
-model     = AutoModel.from_pretrained(MODEL_ID, trust_remote_code=True, token=HF_TOKEN).to(DEVICE).eval()
+model = AutoModel.from_pretrained(
+    MODEL_ID, 
+    trust_remote_code=True, 
+    token=HF_TOKEN,
+    torch_dtype=torch.float16,  # ✅ Thêm dòng này
+    device_map="cuda"            # ✅ Thêm dòng này
+).eval()
 
 processor.model = model
 logger.info("[INIT] ✓ Processor linked to model")
